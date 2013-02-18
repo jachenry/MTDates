@@ -234,6 +234,7 @@ typedef enum {
 - (BOOL)isWithinSameWeek:(NSDate *)date;
 - (BOOL)isWithinSameDay:(NSDate *)date;
 - (BOOL)isWithinSameHour:(NSDate *)date;
+- (BOOL)isWithinSameYear:(NSDate *)date;
 - (BOOL)isBetweenDate:(NSDate *)date1 andDate:(NSDate *)date2;
 
 
@@ -253,6 +254,7 @@ typedef enum {
 - (NSString *)stringFromDateWithShortWeekdayTitle;
 - (NSString *)stringFromDateWithFullWeekdayTitle;
 - (NSString *)stringFromDateWithFormat:(NSString *)format;    // http://unicode.org/reports/tr35/tr35-10.html#Date_Format_Patterns
+- (NSString *)stringFromUTCDateWithFormat:(NSString *)format;
 - (NSString *)stringFromDateWithISODateTime;
 - (NSString *)stringFromDateWithGreatestComponentsForSecondsPassed:(NSTimeInterval)interval;
 - (NSString *)stringFromDateWithGreatestComponentsUntilDate:(NSDate *)date;

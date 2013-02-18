@@ -994,13 +994,16 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
     return [formatter stringFromDate:self];
 }
 
+- (NSString *)stringFromUTCDateWithFormat:(NSString *)format{
+    NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:format];
+    [formatter setTimeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]];
+    return [formatter stringFromDate:self];
+}
+
 - (NSString *)stringFromDateWithISODateTime
 {
-    NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss Z"];
-    [formatter setTimeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]];
-    NSString* result = [formatter stringFromDate:self];
-    return result;
+    return [self stringFromUTCDateWithFormat:@"yyyy-MM-dd HH:mm:ss Z"];
 }
 
 - (NSString *)stringFromDateWithGreatestComponentsForSecondsPassed:(NSTimeInterval)interval
