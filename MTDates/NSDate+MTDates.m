@@ -28,11 +28,12 @@
 
 @implementation NSDate (MTDates)
 
-// These are NOT thread safe, so we must use a seperate one on each thread
-static NSMutableDictionary          *__calendars            = nil;
-static NSMutableDictionary          *__components           = nil;
-static NSMutableDictionary          *__formatters           = nil;
 
+static NSCalendar                   *__calendar             = nil;
+static NSDateComponents             *__components           = nil;
+static NSDateFormatter              *__formatter            = nil;
+
+static NSString                     *__calendarType         = nil;
 static NSLocale                     *__locale               = nil;
 static NSTimeZone                   *__timeZone             = nil;
 static NSUInteger                   __firstWeekday          = 1;
@@ -44,109 +45,67 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
 
 
 
-#pragma mark - STATIC
 
-+ (NSString *)threadIdentifier
+
+
++ (NSDateFormatter *)mt_sharedFormatter
 {
-    return [NSString stringWithFormat:@"%p", (void *) [NSThread currentThread]];
-}
+    [self mt_prepareDefaults];
 
-+ (NSCalendar *)calendar
-{
-    if (!__calendars) __calendars = [[NSMutableDictionary alloc] initWithCapacity:0];
-
-    NSString *keyName = [NSDate threadIdentifier];
-    NSCalendar *calendar = __calendars[keyName];
-
-    if (!calendar) {
-        calendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSGregorianCalendar];
-        calendar.firstWeekday = __firstWeekday;
-        calendar.minimumDaysInFirstWeek = (NSUInteger)__weekNumberingSystem;
-        if (__timeZone) calendar.timeZone = __timeZone;
-        __calendars[keyName] = calendar;
+    if (!__formatter) {
+        __formatter           = [[NSDateFormatter alloc] init];
+        __formatter.calendar  = [self mt_calendar];
+        __formatter.locale    = __locale;
+        __formatter.timeZone  = __timeZone;
+        [__formatter setDateStyle:__dateStyle];
+        [__formatter setTimeStyle:__timeStyle];
     }
 
-    return calendar;
+    return __formatter;
 }
 
-+ (NSDateComponents *)components
+
+
+#pragma mark - GLOBAL CONFIG
+
++ (void)mt_setCalendarIdentifier:(NSString *)identifier
 {
-    if (!__components) __components = [[NSMutableDictionary alloc] initWithCapacity:0];
-
-    NSString *keyName = [NSDate threadIdentifier];
-    NSDateComponents *component = __components[keyName];
-
-    if (!component) {
-        component = [[NSDateComponents alloc] init];
-        component.calendar = [self calendar];
-        if (__timeZone) component.timeZone = __timeZone;
-        __components[keyName] = component;
-    }
-
-    [component setEra:NSUndefinedDateComponent];
-    [component setYear:NSUndefinedDateComponent];
-    [component setMonth:NSUndefinedDateComponent];
-    [component setDay:NSUndefinedDateComponent];
-    [component setHour:NSUndefinedDateComponent];
-    [component setMinute:NSUndefinedDateComponent];
-    [component setSecond:NSUndefinedDateComponent];
-    [component setWeek:NSUndefinedDateComponent];
-    [component setWeekday:NSUndefinedDateComponent];
-    [component setWeekdayOrdinal:NSUndefinedDateComponent];
-    [component setQuarter:NSUndefinedDateComponent];
-
-    return component;
+	@synchronized([NSDate mt_lockObject]){
+        __calendarType = identifier;
+        [self mt_reset];
+	}
 }
 
-+ (NSDateFormatter *)sharedFormatter
++ (void)mt_setLocale:(NSLocale *)locale
 {
-    if (!__formatters) __formatters = [[NSMutableDictionary alloc] initWithCapacity:0];
-
-    NSString *keyName = [NSDate threadIdentifier];
-    NSDateFormatter *formatter = __formatters[keyName];
-
-    if (!formatter) {
-        formatter = [[NSDateFormatter alloc] init];
-        formatter.calendar = [self calendar];
-        if (__locale) formatter.locale = __locale;
-        if (__timeZone) formatter.timeZone = __timeZone;
-        [formatter setDateStyle:__dateStyle];
-        [formatter setTimeStyle:__timeStyle];
-        __formatters[keyName] = formatter;
-    }
-
-    return formatter;
+	@synchronized([NSDate mt_lockObject]){
+        __locale = locale;
+        [self mt_reset];
+	}
 }
 
-+ (void)reset
++ (void)mt_setTimeZone:(NSTimeZone *)timeZone
 {
-    [__calendars removeAllObjects];
-    [__components removeAllObjects];
-    [__formatters removeAllObjects];
+	@synchronized([NSDate mt_lockObject]){
+        __timeZone = timeZone;
+        [self mt_reset];
+	}
 }
 
-+ (void)setLocale:(NSLocale *)locale
++ (void)mt_setFirstDayOfWeek:(NSUInteger)firstDay
 {
-    __locale = locale;
-    [self reset];
+	@synchronized([NSDate mt_lockObject]){
+        __firstWeekday = firstDay;
+        [self mt_reset];
+	}
 }
 
-+ (void)setTimeZone:(NSTimeZone *)timeZone
++ (void)mt_setWeekNumberingSystem:(MTDateWeekNumberingSystem)system
 {
-    __timeZone = timeZone;
-    [self reset];
-}
-
-+ (void)setFirstDayOfWeek:(NSUInteger)firstDay
-{
-    __firstWeekday = firstDay;
-    [self reset];
-}
-
-+ (void)setWeekNumberingSystem:(MTDateWeekNumberingSystem)system
-{
-    __weekNumberingSystem = system;
-    [self reset];
+	@synchronized([NSDate mt_lockObject]){
+        __weekNumberingSystem = system;
+        [self mt_reset];
+	}
 }
 
 
@@ -154,156 +113,217 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
 
 #pragma mark - CONSTRUCTORS
 
-+ (NSDate *)dateFromISOString:(NSString *)ISOString
++ (NSDate *)mt_dateFromISOString:(NSString *)ISOString
 {
-    if (ISOString == nil || (NSNull *)ISOString == [NSNull null]) return nil;
-    NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
-    [formatter setTimeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]];
+	@synchronized([NSDate mt_lockObject]){
+        if (ISOString == nil || (NSNull *)ISOString == [NSNull null]) return nil;
+        NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+        [formatter setTimeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]];
 
-    NSArray *formatsToTry = @[ @"yyyy-MM-dd HH:mm:ss ZZZ", @"yyyy-MM-dd HH:mm:ss Z", @"yyyy-MM-dd HH:mm:ss", @"yyyy-MM-dd'T'HH:mm:ss'Z'" ];
+        NSArray *formatsToTry = @[ @"yyyy-MM-dd HH:mm:ss ZZZ", @"yyyy-MM-dd HH:mm:ss Z", @"yyyy-MM-dd HH:mm:ss", @"yyyy-MM-dd'T'HH:mm:ss'Z'" ];
 
-    NSDate *result = nil;
-    for (NSString *format in formatsToTry) {
+        NSDate *result = nil;
+        for (NSString *format in formatsToTry) {
+            [formatter setDateFormat:format];
+            result = [formatter dateFromString:ISOString];
+            if (result) break;
+        }
+
+        return result;
+	}
+}
+
++ (NSDate *)mt_dateFromString:(NSString *)string usingFormat:(NSString *)format
+{
+	@synchronized([NSDate mt_lockObject]){
+        if (string == nil || (NSNull *)string == [NSNull null]) return nil;
+        NSDateFormatter* formatter = [self mt_sharedFormatter];
         [formatter setDateFormat:format];
-        result = [formatter dateFromString:ISOString];
-        if (result) break;
-    }
-
-    return result;
+        return [formatter dateFromString:string];
+	}
 }
 
-+ (NSDate *)dateFromString:(NSString *)string usingFormat:(NSString *)format
++ (NSDate *)mt_dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day
 {
-    if (string == nil || (NSNull *)string == [NSNull null]) return nil;
-    NSDateFormatter* formatter = [self sharedFormatter];
-    [formatter setDateFormat:format];
-    return [formatter dateFromString:string];
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateFromYear:year
+                               month:month
+                                 day:day
+                                hour:[NSDate mt_minValueForUnit:NSHourCalendarUnit]
+                              minute:[NSDate mt_minValueForUnit:NSMinuteCalendarUnit]];
+	}
 }
 
-+ (NSDate *)dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day
++ (NSDate *)mt_dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day hour:(NSUInteger)hour minute:(NSUInteger)minute
 {
-    NSDateComponents *comps = [NSDate components];
-    [comps setYear:year];
-    [comps setMonth:month];
-    [comps setDay:day];
-    [comps setHour:0];
-    [comps setMinute:0];
-    [comps setSecond:0];
-    return [[NSDate calendar] dateFromComponents:comps];
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateFromYear:year
+                               month:month
+                                 day:day
+                                hour:hour
+                              minute:minute
+                              second:[NSDate mt_minValueForUnit:NSSecondCalendarUnit]];
+	}
 }
 
-+ (NSDate *)dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day hour:(NSUInteger)hour minute:(NSUInteger)minute
++ (NSDate *)mt_dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day hour:(NSUInteger)hour minute:(NSUInteger)minute second:(NSUInteger)second
 {
-    NSDateComponents *comps = [NSDate components];
-    [comps setYear:year];
-    [comps setMonth:month];
-    [comps setDay:day];
-    [comps setHour:hour];
-    [comps setMinute:minute];
-    [comps setSecond:0];
-    return [[NSDate calendar] dateFromComponents:comps];//@leaks
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [NSDate mt_components];
+        [comps setYear:year];
+        [comps setMonth:month];
+        [comps setDay:day];
+        [comps setHour:hour];
+        [comps setMinute:minute];
+        [comps setSecond:second];
+        return [[NSDate mt_calendar] dateFromComponents:comps];
+	}
 }
 
-+ (NSDate *)dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day hour:(NSUInteger)hour minute:(NSUInteger)minute second:(NSUInteger)second
++ (NSDate *)mt_dateFromYear:(NSUInteger)year week:(NSUInteger)week weekday:(NSUInteger)weekday
 {
-    NSDateComponents *comps = [NSDate components];
-    [comps setYear:year];
-    [comps setMonth:month];
-    [comps setDay:day];
-    [comps setHour:hour];
-    [comps setMinute:minute];
-    [comps setSecond:second];
-    return [[NSDate calendar] dateFromComponents:comps];
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateFromYear:year
+                                week:week
+                             weekday:weekday
+                                hour:[NSDate mt_minValueForUnit:NSHourCalendarUnit]
+                              minute:[NSDate mt_minValueForUnit:NSMinuteCalendarUnit]];
+	}
 }
 
-+ (NSDate *)dateFromYear:(NSUInteger)year week:(NSUInteger)week weekDay:(NSUInteger)weekDay
++ (NSDate *)mt_dateFromYear:(NSUInteger)year week:(NSUInteger)week weekday:(NSUInteger)weekday hour:(NSUInteger)hour minute:(NSUInteger)minute
 {
-    NSDateComponents *comps = [NSDate components];
-    [comps setYear:year];
-    [comps setWeek:week];
-    [comps setWeekday:weekDay];
-    [comps setHour:0];
-    [comps setMinute:0];
-    [comps setSecond:0];
-    return [[NSDate calendar] dateFromComponents:comps];
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateFromYear:year
+                                week:week
+                             weekday:weekday
+                                hour:hour
+                              minute:minute
+                              second:[NSDate mt_minValueForUnit:NSSecondCalendarUnit]];
+	}
 }
 
-+ (NSDate *)dateFromYear:(NSUInteger)year week:(NSUInteger)week weekDay:(NSUInteger)weekDay hour:(NSUInteger)hour minute:(NSUInteger)minute
++ (NSDate *)mt_dateFromYear:(NSUInteger)year week:(NSUInteger)week weekday:(NSUInteger)weekday hour:(NSUInteger)hour minute:(NSUInteger)minute second:(NSUInteger)second
 {
-    NSDateComponents *comps = [NSDate components];
-    [comps setYear:year];
-    [comps setWeek:week];
-    [comps setWeekday:weekDay];
-    [comps setHour:hour];
-    [comps setMinute:minute];
-    [comps setSecond:0];
-    return [[NSDate calendar] dateFromComponents:comps];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [NSDate mt_components];
+        [comps setYear:year];
+        [comps setWeek:week];
+        [comps setWeekday:weekday];
+        [comps setHour:hour];
+        [comps setMinute:minute];
+        [comps setSecond:second];
+        return [[NSDate mt_calendar] dateFromComponents:comps];
+	}
 }
 
-+ (NSDate *)dateFromYear:(NSUInteger)year week:(NSUInteger)week weekDay:(NSUInteger)weekDay hour:(NSUInteger)hour minute:(NSUInteger)minute second:(NSUInteger)second
+- (NSDate *)mt_dateByAddingYears:(NSInteger)years months:(NSInteger)months weeks:(NSInteger)weeks days:(NSInteger)days hours:(NSInteger)hours minutes:(NSInteger)minutes seconds:(NSInteger)seconds
 {
-    NSDateComponents *comps = [NSDate components];
-    [comps setYear:year];
-    [comps setWeek:week];
-    [comps setWeekday:weekDay];
-    [comps setHour:hour];
-    [comps setMinute:minute];
-    [comps setSecond:second];
-    return [[NSDate calendar] dateFromComponents:comps];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [NSDate mt_components];
+        if (years)      [comps setYear:years];
+        if (months)     [comps setMonth:months];
+        if (weeks)      [comps setWeek:weeks];
+        if (days)       [comps setDay:days];
+        if (hours)      [comps setHour:hours];
+        if (minutes)    [comps setMinute:minutes];
+        if (seconds)    [comps setSecond:seconds];
+        return [[NSDate mt_calendar] dateByAddingComponents:comps toDate:self options:0];
+	}
 }
 
-- (NSDate *)dateByAddingYears:(NSInteger)years months:(NSInteger)months weeks:(NSInteger)weeks days:(NSInteger)days hours:(NSInteger)hours minutes:(NSInteger)minutes seconds:(NSInteger)seconds
++ (NSDate *)mt_dateFromComponents:(NSDateComponents *)components
 {
-    NSDateComponents *comps = [NSDate components];
-    if (years)      [comps setYear:years];
-    if (months)     [comps setMonth:months];
-    if (weeks)      [comps setWeek:weeks];
-    if (days)       [comps setDay:days];
-    if (hours)      [comps setHour:hours];
-    if (minutes)    [comps setMinute:minutes];
-    if (seconds)    [comps setSecond:seconds];
-    return [[NSDate calendar] dateByAddingComponents:comps toDate:self options:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_calendar] dateFromComponents:components];
+	}
 }
 
-+ (NSDate *)dateFromComponents:(NSDateComponents *)components
++ (NSDate*)mt_startOfToday
 {
-    return [[NSDate calendar] dateFromComponents:components];
+    @synchronized([NSDate mt_lockObject]){
+        return [[NSDate date] mt_startOfCurrentDay];
+	}
 }
 
++ (NSDate*)mt_startOfYesterday
+{
+    @synchronized([NSDate mt_lockObject]){
+        return [[NSDate date] mt_startOfPreviousDay];
+	}
+}
 
++ (NSDate*)mt_startOfTomorrow
+{
+    @synchronized([NSDate mt_lockObject]){
+        return [[NSDate date] mt_startOfNextDay];
+	}
+}
 
++ (NSDate*)mt_endOfToday
+{
+    @synchronized([NSDate mt_lockObject]){
+        return [[NSDate date] mt_endOfCurrentDay];
+	}
+}
+
++ (NSDate*)mt_endOfYesterday
+{
+    @synchronized([NSDate mt_lockObject]){
+        return [[NSDate date] mt_endOfPreviousDay];
+	}
+}
+
++ (NSDate*)mt_endOfTomorrow
+{
+    @synchronized([NSDate mt_lockObject]){
+        return [[NSDate date] mt_endOfNextDay];
+	}
+}
 
 
 #pragma mark - SYMBOLS
 
-+ (NSArray *)shortWeekdaySymbols
++ (NSArray *)mt_shortWeekdaySymbols
 {
-    return [[NSDate sharedFormatter] shortWeekdaySymbols];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_sharedFormatter] shortWeekdaySymbols];
+	}
 }
 
-+ (NSArray *)weekdaySymbols
++ (NSArray *)mt_weekdaySymbols
 {
-    return [[NSDate sharedFormatter] weekdaySymbols];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_sharedFormatter] weekdaySymbols];
+	}
 }
 
-+ (NSArray *)veryShortWeekdaySymbols
++ (NSArray *)mt_veryShortWeekdaySymbols
 {
-    return [[NSDate sharedFormatter] veryShortWeekdaySymbols];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_sharedFormatter] veryShortWeekdaySymbols];
+	}
 }
 
-+ (NSArray *)shortMonthlySymbols
++ (NSArray *)mt_shortMonthlySymbols
 {
-    return [[NSDate sharedFormatter] shortMonthSymbols];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_sharedFormatter] shortMonthSymbols];
+	}
 }
 
-+ (NSArray *)monthlySymbols
++ (NSArray *)mt_monthlySymbols
 {
-    return [[NSDate sharedFormatter] monthSymbols];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_sharedFormatter] monthSymbols];
+	}
 }
 
-+ (NSArray *)veryShortMonthlySymbols
++ (NSArray *)mt_veryShortMonthlySymbols
 {
-    return [[NSDate sharedFormatter] veryShortMonthSymbols];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_sharedFormatter] veryShortMonthSymbols];
+	}
 }
 
 
@@ -311,62 +331,90 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
 
 #pragma mark - COMPONENTS
 
-- (NSUInteger)year
+- (NSUInteger)mt_year
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSYearCalendarUnit fromDate:self];
-    return [components year];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSYearCalendarUnit fromDate:self];
+        return [components year];
+	}
 }
 
-- (NSUInteger)weekOfYear
+- (NSUInteger)mt_weekOfYear
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSWeekOfYearCalendarUnit | NSYearCalendarUnit fromDate:self];
-    return [comps weekOfYear];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSWeekOfYearCalendarUnit | NSYearCalendarUnit fromDate:self];
+        return [comps weekOfYear];
+	}
 }
 
-- (NSUInteger)weekDayOfWeek
+- (NSUInteger)mt_weekOfMonth
 {
-    return [[NSDate calendar] ordinalityOfUnit:NSWeekdayCalendarUnit inUnit:NSWeekCalendarUnit forDate:self];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSWeekOfMonthCalendarUnit fromDate:self];
+        return [components weekOfMonth];
+	}
 }
 
-- (NSUInteger)monthOfYear
+- (NSUInteger)mt_weekdayOfWeek
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSMonthCalendarUnit fromDate:self];
-    return [components month];
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_calendar] ordinalityOfUnit:NSWeekdayCalendarUnit inUnit:NSWeekCalendarUnit forDate:self];
+	}
 }
 
-- (NSUInteger)dayOfMonth
+- (NSUInteger)mt_monthOfYear
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSDayCalendarUnit fromDate:self];
-    return [components day];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSMonthCalendarUnit fromDate:self];
+        return [components month];
+	}
 }
 
-- (NSUInteger)hourOfDay
+- (NSUInteger)mt_dayOfMonth
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSHourCalendarUnit fromDate:self];
-    return [components hour];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSDayCalendarUnit fromDate:self];
+        return [components day];
+	}
 }
 
-- (NSUInteger)minuteOfHour
+- (NSUInteger)mt_hourOfDay
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSMinuteCalendarUnit fromDate:self];
-    return [components minute];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSHourCalendarUnit fromDate:self];
+        return [components hour];
+	}
 }
 
-- (NSUInteger)secondOfMinute
+- (NSUInteger)mt_minuteOfHour
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSSecondCalendarUnit fromDate:self];
-    return [components second];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSMinuteCalendarUnit fromDate:self];
+        return [components minute];
+	}
 }
 
-- (NSTimeInterval)secondsIntoDay
+- (NSUInteger)mt_secondOfMinute
 {
-    return [self timeIntervalSinceDate:[self startOfCurrentDay]];
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSSecondCalendarUnit fromDate:self];
+        return [components second];
+	}
 }
 
-- (NSDateComponents *)components
+- (NSTimeInterval)mt_secondsIntoDay
 {
-    NSCalendarUnit units = NSYearCalendarUnit | NSMonthCalendarUnit | NSWeekOfYearCalendarUnit | NSWeekdayCalendarUnit | NSDayCalendarUnit | NSHourCalendarUnit | NSMinuteCalendarUnit | NSSecondCalendarUnit;
-    return [[NSDate calendar] components:units fromDate:self];
+	@synchronized([NSDate mt_lockObject]){
+        return [self timeIntervalSinceDate:[self mt_startOfCurrentDay]];
+	}
+}
+
+- (NSDateComponents *)mt_components
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSCalendarUnit units = NSYearCalendarUnit | NSMonthCalendarUnit | NSWeekOfYearCalendarUnit | NSWeekdayCalendarUnit | NSDayCalendarUnit | NSHourCalendarUnit | NSMinuteCalendarUnit | NSSecondCalendarUnit;
+        return [[NSDate mt_calendar] components:units fromDate:self];
+	}
 }
 
 
@@ -376,552 +424,747 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
 
 #pragma mark years
 
-- (NSDate *)startOfPreviousYear
+- (NSDate *)mt_startOfPreviousYear
 {
-    return [[self startOfCurrentYear] oneYearPrevious];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentYear] mt_oneYearPrevious];
+	}
 }
 
-- (NSDate *)startOfCurrentYear
+- (NSDate *)mt_startOfCurrentYear
 {
-    return [NSDate dateFromYear:[self year] month:1 day:1];
+	@synchronized([NSDate mt_lockObject]){
+        return [NSDate mt_dateFromYear:[self mt_year]
+                                 month:[NSDate mt_minValueForUnit:NSMonthCalendarUnit]
+                                   day:[NSDate mt_minValueForUnit:NSDayCalendarUnit]];
+	}
 }
 
-- (NSDate *)startOfNextYear
+- (NSDate *)mt_startOfNextYear
 {
-    return [[self startOfCurrentYear] oneYearNext];
-}
-
-
-- (NSDate *)endOfPreviousYear
-{
-    return [[self endOfCurrentYear] oneYearPrevious];
-}
-
-- (NSDate *)endOfCurrentYear
-{
-    return [[self startOfCurrentYear] dateByAddingYears:1 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
-}
-
-- (NSDate *)endOfNextYear
-{
-    return [[self endOfCurrentYear] oneYearNext];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentYear] mt_oneYearNext];
+	}
 }
 
 
-- (NSDate *)oneYearPrevious
+- (NSDate *)mt_endOfPreviousYear
 {
-    return [self dateByAddingYears:-1 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentYear] mt_oneYearPrevious];
+	}
 }
 
-- (NSDate *)oneYearNext
+- (NSDate *)mt_endOfCurrentYear
 {
-    return [self dateByAddingYears:1 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentYear] mt_dateByAddingYears:1 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
+	}
 }
 
-
-- (NSDate *)dateYearsBefore:(NSUInteger)years
+- (NSDate *)mt_endOfNextYear
 {
-    return [self dateByAddingYears:-years months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
-}
-
-- (NSDate *)dateYearsAfter:(NSUInteger)years
-{
-    return [self dateByAddingYears:years months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
-}
-
-
-- (NSInteger)yearsSinceDate:(NSDate *)date
-{
-    NSDateComponents *comps = [[NSDate calendar] components:NSYearCalendarUnit fromDate:date toDate:self options:0];
-    NSInteger years = [comps year];
-    return years;
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentYear] mt_oneYearNext];
+	}
 }
 
 
-- (NSInteger)yearsUntilDate:(NSDate *)date
+- (NSDate *)mt_oneYearPrevious
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSYearCalendarUnit fromDate:self toDate:date options:0];
-    NSInteger years = [comps year];
-    return years;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:-1 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_oneYearNext
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:1 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+
+- (NSDate *)mt_dateYearsBefore:(NSUInteger)years
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:-years months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_dateYearsAfter:(NSUInteger)years
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:years months:0 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+
+- (NSInteger)mt_yearsSinceDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSYearCalendarUnit fromDate:date toDate:self options:0];
+        NSInteger years = [comps year];
+        return years;
+	}
+}
+
+
+- (NSInteger)mt_yearsUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSYearCalendarUnit fromDate:self toDate:date options:0];
+        NSInteger years = [comps year];
+        return years;
+	}
 }
 
 
 #pragma mark months
 
-- (NSDate *)startOfPreviousMonth
+- (NSDate *)mt_startOfPreviousMonth
 {
-    return [[self startOfCurrentMonth] oneMonthPrevious];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentMonth] mt_oneMonthPrevious];
+	}
 }
 
-- (NSDate *)startOfCurrentMonth
+- (NSDate *)mt_startOfCurrentMonth
 {
-    return [NSDate dateFromYear:[self year] month:[self monthOfYear] day:1];
+	@synchronized([NSDate mt_lockObject]){
+        return [NSDate mt_dateFromYear:[self mt_year]
+                                 month:[self mt_monthOfYear]
+                                   day:[NSDate mt_minValueForUnit:NSDayCalendarUnit]];
+	}
 }
 
-- (NSDate *)startOfNextMonth
+- (NSDate *)mt_startOfNextMonth
 {
-    return [[self startOfCurrentMonth] oneMonthNext];
-}
-
-
-- (NSDate *)endOfPreviousMonth
-{
-    return [[self endOfCurrentMonth] oneMonthPrevious];
-}
-
-- (NSDate *)endOfCurrentMonth
-{
-    return [[self startOfCurrentMonth] dateByAddingYears:0 months:1 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
-}
-
-- (NSDate *)endOfNextMonth
-{
-    return [[self endOfCurrentMonth] oneMonthNext];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentMonth] mt_oneMonthNext];
+	}
 }
 
 
-- (NSDate *)oneMonthPrevious
+- (NSDate *)mt_endOfPreviousMonth
 {
-    return [self dateByAddingYears:0 months:-1 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentMonth] mt_oneMonthPrevious];
+	}
 }
 
-- (NSDate *)oneMonthNext
+- (NSDate *)mt_endOfCurrentMonth
 {
-    return [self dateByAddingYears:0 months:1 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentMonth] mt_dateByAddingYears:0 months:1 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
+	}
 }
 
-
-- (NSDate *)dateMonthsBefore:(NSUInteger)months
+- (NSDate *)mt_endOfNextMonth
 {
-    return [self dateByAddingYears:0 months:-months weeks:0 days:0 hours:0 minutes:0 seconds:0];
-}
-
-- (NSDate *)dateMonthsAfter:(NSUInteger)months
-{
-    return [self dateByAddingYears:0 months:months weeks:0 days:0 hours:0 minutes:0 seconds:0];
-}
-
-
-- (NSInteger)monthsSinceDate:(NSDate *)date
-{
-    NSDateComponents *components = [[NSDate calendar] components:NSMonthCalendarUnit fromDate:date toDate:self options:0];
-    NSInteger months = [components month];
-    return months;
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentMonth] mt_oneMonthNext];
+	}
 }
 
 
-- (NSInteger)monthsUntilDate:(NSDate *)date
+- (NSDate *)mt_oneMonthPrevious
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSMonthCalendarUnit fromDate:self toDate:date options:0];
-    NSInteger months = [components month];
-    return months;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:-1 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_oneMonthNext
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:1 weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+
+- (NSDate *)mt_dateMonthsBefore:(NSUInteger)months
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:-months weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_dateMonthsAfter:(NSUInteger)months
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:months weeks:0 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+
+- (NSInteger)mt_monthsSinceDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSMonthCalendarUnit fromDate:date toDate:self options:0];
+        NSInteger months = [components month];
+        return months;
+	}
+}
+
+
+- (NSInteger)mt_monthsUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSMonthCalendarUnit fromDate:self toDate:date options:0];
+        NSInteger months = [components month];
+        return months;
+	}
 }
 
 
 #pragma mark weeks
 
-- (NSDate *)startOfPreviousWeek
+- (NSDate *)mt_startOfPreviousWeek
 {
-    return [[self startOfCurrentWeek] oneWeekPrevious];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentWeek] mt_oneWeekPrevious];
+	}
 }
 
-- (NSDate *)startOfCurrentWeek
+- (NSDate *)mt_startOfCurrentWeek
 {
-    NSInteger weekday = [self weekDayOfWeek];
-    NSDate *date = [self dateDaysAfter:-(weekday - 1)];
-    return [NSDate dateFromYear:[date year] month:[date monthOfYear] day:[date dayOfMonth] hour:0 minute:0 second:0];
+	@synchronized([NSDate mt_lockObject]){
+        NSInteger weekday = [self mt_weekdayOfWeek];
+        NSDate *date = [self mt_dateDaysAfter:-(weekday - 1)];
+        return [NSDate mt_dateFromYear:[date mt_year]
+                                 month:[date mt_monthOfYear]
+                                   day:[date mt_dayOfMonth]
+                                  hour:[NSDate mt_minValueForUnit:NSHourCalendarUnit]
+                                minute:[NSDate mt_minValueForUnit:NSMinuteCalendarUnit]
+                                second:[NSDate mt_minValueForUnit:NSSecondCalendarUnit]];
+	}
 }
 
-- (NSDate *)startOfNextWeek
+- (NSDate *)mt_startOfNextWeek
 {
-    return [[self startOfCurrentWeek] oneWeekNext];
-}
-
-
-- (NSDate *)endOfPreviousWeek
-{
-    return [[self endOfCurrentWeek] oneWeekPrevious];
-}
-
-- (NSDate *)endOfCurrentWeek
-{
-    return [[self startOfCurrentWeek] dateByAddingYears:0 months:0 weeks:1 days:0 hours:0 minutes:0 seconds:-1];
-}
-
-- (NSDate *)endOfNextWeek
-{
-    return [[self endOfCurrentWeek] oneWeekNext];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentWeek] mt_oneWeekNext];
+	}
 }
 
 
-- (NSDate *)oneWeekPrevious
+- (NSDate *)mt_endOfPreviousWeek
 {
-    return [self dateByAddingYears:0 months:0 weeks:-1 days:0 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentWeek] mt_oneWeekPrevious];
+	}
 }
 
-- (NSDate *)oneWeekNext
+- (NSDate *)mt_endOfCurrentWeek
 {
-    return [self dateByAddingYears:0 months:0 weeks:1 days:0 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentWeek] mt_dateByAddingYears:0 months:0 weeks:1 days:0 hours:0 minutes:0 seconds:-1];
+	}
 }
 
-- (NSDate *)dateWeeksBefore:(NSUInteger)weeks
+- (NSDate *)mt_endOfNextWeek
 {
-    return [self dateByAddingYears:0 months:0 weeks:-weeks days:0 hours:0 minutes:0 seconds:0];
-}
-
-- (NSDate *)dateWeeksAfter:(NSUInteger)weeks
-{
-    return [self dateByAddingYears:0 months:0 weeks:weeks days:0 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentWeek] mt_oneWeekNext];
+	}
 }
 
 
-- (NSInteger)weeksSinceDate:(NSDate *)date
+- (NSDate *)mt_oneWeekPrevious
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSWeekCalendarUnit fromDate:date toDate:self options:0];
-    NSInteger weeks = [components week];
-    return weeks;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:-1 days:0 hours:0 minutes:0 seconds:0];
+	}
 }
 
-- (NSInteger)weeksUntilDate:(NSDate *)date
+- (NSDate *)mt_oneWeekNext
 {
-    NSDateComponents *components = [[NSDate calendar] components:NSWeekCalendarUnit fromDate:self toDate:date options:0];
-    NSInteger weeks = [components week];
-    return weeks;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:1 days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_dateWeeksBefore:(NSUInteger)weeks
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:-weeks days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_dateWeeksAfter:(NSUInteger)weeks
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:weeks days:0 hours:0 minutes:0 seconds:0];
+	}
+}
+
+
+- (NSInteger)mt_weeksSinceDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSWeekCalendarUnit fromDate:date toDate:self options:0];
+        NSInteger weeks = [components week];
+        return weeks;
+	}
+}
+
+- (NSInteger)mt_weeksUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *components = [[NSDate mt_calendar] components:NSWeekCalendarUnit fromDate:self toDate:date options:0];
+        NSInteger weeks = [components week];
+        return weeks;
+	}
 }
 
 
 #pragma mark days
 
-- (NSDate *)startOfPreviousDay
+- (NSDate *)mt_startOfPreviousDay
 {
-    return [[self startOfCurrentDay] oneDayPrevious];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentDay] mt_oneDayPrevious];
+	}
 }
 
-- (NSDate *)startOfCurrentDay
+- (NSDate *)mt_startOfCurrentDay
 {
-    return [NSDate dateFromYear:[self year] month:[self monthOfYear] day:[self dayOfMonth] hour:0 minute:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [NSDate mt_dateFromYear:[self mt_year]
+                                 month:[self mt_monthOfYear]
+                                   day:[self mt_dayOfMonth]
+                                  hour:[NSDate mt_minValueForUnit:NSHourCalendarUnit]
+                                minute:[NSDate mt_minValueForUnit:NSMinuteCalendarUnit]];
+	}
 }
 
-- (NSDate *)startOfNextDay
+- (NSDate *)mt_startOfNextDay
 {
-    return [[self startOfCurrentDay] oneDayNext];
-}
-
-
-- (NSDate *)endOfPreviousDay
-{
-    return [[self endOfCurrentDay] oneDayPrevious];
-}
-
-- (NSDate *)endOfCurrentDay
-{
-    return [[self startOfCurrentDay] dateByAddingYears:0 months:0 weeks:0 days:1 hours:0 minutes:0 seconds:-1];
-}
-
-- (NSDate *)endOfNextDay
-{
-    return [[self endOfCurrentDay] oneDayNext];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentDay] mt_oneDayNext];
+	}
 }
 
 
-- (NSDate *)oneDayPrevious
+- (NSDate *)mt_endOfPreviousDay
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:-1 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentDay] mt_oneDayPrevious];
+	}
 }
 
-- (NSDate *)oneDayNext
+- (NSDate *)mt_endOfCurrentDay
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:1 hours:0 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentDay] mt_dateByAddingYears:0 months:0 weeks:0 days:1 hours:0 minutes:0 seconds:-1];
+	}
 }
 
-
-- (NSDate *)dateDaysBefore:(NSUInteger)days
+- (NSDate *)mt_endOfNextDay
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:-days hours:0 minutes:0 seconds:0];
-}
-
-- (NSDate *)dateDaysAfter:(NSUInteger)days
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:days hours:0 minutes:0 seconds:0];
-}
-
-
-- (NSInteger)daysSinceDate:(NSDate *)date
-{
-    NSDateComponents *comps = [[NSDate calendar] components:NSDayCalendarUnit fromDate:date toDate:self options:0];
-    NSInteger days = [comps day];
-    return days;
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentDay] mt_oneDayNext];
+	}
 }
 
 
-- (NSInteger)daysUntilDate:(NSDate *)date
+- (NSDate *)mt_oneDayPrevious
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSDayCalendarUnit fromDate:self toDate:date options:0];
-    NSInteger days = [comps day];
-    return days;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:-1 hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_oneDayNext
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:1 hours:0 minutes:0 seconds:0];
+	}
+}
+
+
+- (NSDate *)mt_dateDaysBefore:(NSUInteger)days
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:-days hours:0 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_dateDaysAfter:(NSUInteger)days
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:days hours:0 minutes:0 seconds:0];
+	}
+}
+
+
+- (NSInteger)mt_daysSinceDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSDayCalendarUnit fromDate:date toDate:self options:0];
+        NSInteger days = [comps day];
+        return days;
+	}
+}
+
+
+- (NSInteger)mt_daysUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSDayCalendarUnit fromDate:self toDate:date options:0];
+        NSInteger days = [comps day];
+        return days;
+	}
 }
 
 
 #pragma mark hours
 
-- (NSDate *)startOfPreviousHour
+- (NSDate *)mt_startOfPreviousHour
 {
-    return [[self startOfCurrentHour] oneHourPrevious];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentHour] mt_oneHourPrevious];
+	}
 }
 
-- (NSDate *)startOfCurrentHour
+- (NSDate *)mt_startOfCurrentHour
 {
-    return [NSDate dateFromYear:[self year] month:[self monthOfYear] day:[self dayOfMonth] hour:[self hourOfDay] minute:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [NSDate mt_dateFromYear:[self mt_year]
+                                 month:[self mt_monthOfYear]
+                                   day:[self mt_dayOfMonth]
+                                  hour:[self mt_hourOfDay]
+                                minute:[NSDate mt_minValueForUnit:NSMinuteCalendarUnit]];
+	}
 }
 
-- (NSDate *)startOfNextHour
+- (NSDate *)mt_startOfNextHour
 {
-    return [[self startOfCurrentHour] oneHourNext];
-}
-
-
-- (NSDate *)endOfPreviousHour
-{
-    return [[self endOfCurrentHour] oneHourPrevious];
-}
-
-- (NSDate *)endOfCurrentHour
-{
-    return [[self startOfCurrentHour] dateByAddingYears:0 months:0 weeks:0 days:0 hours:1 minutes:0 seconds:-1];
-}
-
-- (NSDate *)endOfNextHour
-{
-    return [[self endOfCurrentHour] oneHourNext];
-}
-
-- (NSDate *)oneHourPrevious
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:-1 minutes:0 seconds:0];
-}
-
-- (NSDate *)oneHourNext
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:1 minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentHour] mt_oneHourNext];
+	}
 }
 
 
-- (NSDate *)dateHoursBefore:(NSUInteger)hours
+- (NSDate *)mt_endOfPreviousHour
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:-hours minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentHour] mt_oneHourPrevious];
+	}
 }
 
-- (NSDate *)dateHoursAfter:(NSUInteger)hours
+- (NSDate *)mt_endOfCurrentHour
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:hours minutes:0 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentHour] mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:1 minutes:0 seconds:-1];
+	}
+}
+
+- (NSDate *)mt_endOfNextHour
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentHour] mt_oneHourNext];
+	}
+}
+
+- (NSDate *)mt_oneHourPrevious
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:-1 minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_oneHourNext
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:1 minutes:0 seconds:0];
+	}
 }
 
 
-- (NSInteger)hoursSinceDate:(NSDate *)date
+- (NSDate *)mt_dateHoursBefore:(NSUInteger)hours
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSHourCalendarUnit fromDate:date toDate:self options:0];
-    NSInteger hours = [comps hour];
-    return hours;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:-hours minutes:0 seconds:0];
+	}
+}
+
+- (NSDate *)mt_dateHoursAfter:(NSUInteger)hours
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:hours minutes:0 seconds:0];
+	}
 }
 
 
-- (NSInteger)hoursUntilDate:(NSDate *)date
+- (NSInteger)mt_hoursSinceDate:(NSDate *)date
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSHourCalendarUnit fromDate:self toDate:date options:0];
-    NSInteger hours = [comps hour];
-    return hours;
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSHourCalendarUnit fromDate:date toDate:self options:0];
+        NSInteger hours = [comps hour];
+        return hours;
+	}
+}
+
+
+- (NSInteger)mt_hoursUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSHourCalendarUnit fromDate:self toDate:date options:0];
+        NSInteger hours = [comps hour];
+        return hours;
+	}
 }
 
 #pragma mark minutes
 
-- (NSDate *)startOfPreviousMinute
+- (NSDate *)mt_startOfPreviousMinute
 {
-    return [[self startOfCurrentMinute] oneMinutePrevious];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentMinute] mt_oneMinutePrevious];
+	}
 }
 
-- (NSDate *)startOfCurrentMinute
+- (NSDate *)mt_startOfCurrentMinute
 {
-    return [NSDate dateFromYear:[self year] month:[self monthOfYear] day:[self dayOfMonth] hour:[self hourOfDay] minute:[self minuteOfHour] second:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [NSDate mt_dateFromYear:[self mt_year]
+                                 month:[self mt_monthOfYear]
+                                   day:[self mt_dayOfMonth]
+                                  hour:[self mt_hourOfDay]
+                                minute:[self mt_minuteOfHour]
+                                second:[NSDate mt_minValueForUnit:NSSecondCalendarUnit]];
+	}
 }
 
-- (NSDate *)startOfNextMinute
+- (NSDate *)mt_startOfNextMinute
 {
-    return [[self startOfCurrentMinute] oneMinuteNext];
-}
-
-
-- (NSDate *)endOfPreviousMinute
-{
-    return [[self endOfCurrentMinute] oneMinutePrevious];
-}
-
-- (NSDate *)endOfCurrentMinute
-{
-    return [[self startOfCurrentMinute] dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:1 seconds:-1];
-}
-
-- (NSDate *)endOfNextMinute
-{
-    return [[self endOfCurrentMinute] oneMinuteNext];
-}
-
-- (NSDate *)oneMinutePrevious
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:-1 seconds:0];
-}
-
-- (NSDate *)oneMinuteNext
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:1 seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentMinute] mt_oneMinuteNext];
+	}
 }
 
 
-- (NSDate *)dateMinutesBefore:(NSUInteger)minutes
+- (NSDate *)mt_endOfPreviousMinute
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:-minutes seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentMinute] mt_oneMinutePrevious];
+	}
 }
 
-- (NSDate *)dateMinutesAfter:(NSUInteger)minutes
+- (NSDate *)mt_endOfCurrentMinute
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:minutes seconds:0];
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentMinute] mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:1 seconds:-1];
+	}
+}
+
+- (NSDate *)mt_endOfNextMinute
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentMinute] mt_oneMinuteNext];
+	}
+}
+
+- (NSDate *)mt_oneMinutePrevious
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:-1 seconds:0];
+	}
+}
+
+- (NSDate *)mt_oneMinuteNext
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:1 seconds:0];
+	}
 }
 
 
-- (NSInteger)minutesSinceDate:(NSDate *)date
+- (NSDate *)mt_dateMinutesBefore:(NSUInteger)minutes
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSMinuteCalendarUnit fromDate:date toDate:self options:0];
-    NSInteger minutes = [comps minute];
-    return minutes;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:-minutes seconds:0];
+	}
+}
+
+- (NSDate *)mt_dateMinutesAfter:(NSUInteger)minutes
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:minutes seconds:0];
+	}
 }
 
 
-- (NSInteger)minutesUntilDate:(NSDate *)date
+- (NSInteger)mt_minutesSinceDate:(NSDate *)date
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSMinuteCalendarUnit fromDate:self toDate:date options:0];
-    NSInteger minutes = [comps minute];
-    return minutes;
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSMinuteCalendarUnit fromDate:date toDate:self options:0];
+        NSInteger minutes = [comps minute];
+        return minutes;
+	}
+}
+
+
+- (NSInteger)mt_minutesUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSMinuteCalendarUnit fromDate:self toDate:date options:0];
+        NSInteger minutes = [comps minute];
+        return minutes;
+	}
 }
 
 #pragma mark seconds
 
-- (NSDate *)startOfPreviousSecond
+- (NSDate *)mt_startOfPreviousSecond
 {
-    return [[self startOfCurrentSecond] oneSecondPrevious];
+	@synchronized([NSDate mt_lockObject]){
+        return [self dateByAddingTimeInterval:-1];
+	}
 }
 
-- (NSDate *)startOfCurrentSecond
+- (NSDate *)mt_startOfNextSecond
 {
-    return [NSDate dateFromYear:[self year] month:[self monthOfYear] day:[self dayOfMonth] hour:[self hourOfDay] minute:[self minuteOfHour] second:[self secondOfMinute]];
+	@synchronized([NSDate mt_lockObject]){
+        return [self dateByAddingTimeInterval:1];
+	}
 }
 
-- (NSDate *)startOfNextSecond
+- (NSDate *)mt_oneSecondPrevious
 {
-    return [[self startOfCurrentSecond] oneSecondNext];
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
+	}
 }
 
-- (NSDate *)oneSecondPrevious
+- (NSDate *)mt_oneSecondNext
 {
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
-}
-
-- (NSDate *)oneSecondNext
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
-}
-
-
-- (NSDate *)dateSecondsBefore:(NSUInteger)seconds
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-seconds];
-}
-
-- (NSDate *)dateSecondsAfter:(NSUInteger)seconds
-{
-    return [self dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:seconds];
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-1];
+	}
 }
 
 
-- (NSInteger)secondsSinceDate:(NSDate *)date
+- (NSDate *)mt_dateSecondsBefore:(NSUInteger)seconds
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSSecondCalendarUnit fromDate:date toDate:self options:0];
-    NSInteger seconds = [comps second];
-    return seconds;
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:-seconds];
+	}
+}
+
+- (NSDate *)mt_dateSecondsAfter:(NSUInteger)seconds
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_dateByAddingYears:0 months:0 weeks:0 days:0 hours:0 minutes:0 seconds:seconds];
+	}
 }
 
 
-- (NSInteger)secondsUntilDate:(NSDate *)date
+- (NSInteger)mt_secondsSinceDate:(NSDate *)date
 {
-    NSDateComponents *comps = [[NSDate calendar] components:NSSecondCalendarUnit fromDate:self toDate:date options:0];
-    NSInteger seconds = [comps second];
-    return seconds;
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSSecondCalendarUnit fromDate:date toDate:self options:0];
+        NSInteger seconds = [comps second];
+        return seconds;
+	}
+}
+
+
+- (NSInteger)mt_secondsUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateComponents *comps = [[NSDate mt_calendar] components:NSSecondCalendarUnit fromDate:self toDate:date options:0];
+        NSInteger seconds = [comps second];
+        return seconds;
+	}
 }
 
 #pragma mark - COMPARES
 
-- (BOOL)isAfter:(NSDate *)date
+- (BOOL)mt_isAfter:(NSDate *)date
 {
-    return [self compare:date] == NSOrderedDescending;
+	@synchronized([NSDate mt_lockObject]){
+        return [self compare:date] == NSOrderedDescending;
+	}
 }
 
-- (BOOL)isBefore:(NSDate *)date
+- (BOOL)mt_isBefore:(NSDate *)date
 {
-    return [self compare:date] == NSOrderedAscending;
+	@synchronized([NSDate mt_lockObject]){
+        return [self compare:date] == NSOrderedAscending;
+	}
 }
 
-- (BOOL)isOnOrAfter:(NSDate *)date
+- (BOOL)mt_isOnOrAfter:(NSDate *)date
 {
-    return [self compare:date] == NSOrderedDescending || [date compare:self] == NSOrderedSame;
+	@synchronized([NSDate mt_lockObject]){
+        return [self compare:date] == NSOrderedDescending || [date compare:self] == NSOrderedSame;
+	}
 }
 
-- (BOOL)isOnOrBefore:(NSDate *)date
+- (BOOL)mt_isOnOrBefore:(NSDate *)date
 {
-    return [self compare:date] == NSOrderedAscending || [self compare:date] == NSOrderedSame;
+	@synchronized([NSDate mt_lockObject]){
+        return [self compare:date] == NSOrderedAscending || [self compare:date] == NSOrderedSame;
+	}
 }
 
-- (BOOL)isWithinSameYear:(NSDate *)date
+- (BOOL)mt_isWithinSameYear:(NSDate *)date
 {
-    if ([self year] == [date year]) {
+	@synchronized([NSDate mt_lockObject]){
+        if ([self mt_year] == [date mt_year]) {
+            return YES;
+        }
+        return NO;
+	}
+}
+
+- (BOOL)mt_isWithinSameMonth:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        if ([self mt_year] == [date mt_year] && [self mt_monthOfYear] == [date mt_monthOfYear]) {
+            return YES;
+        }
+        return NO;
+	}
+}
+
+- (BOOL)mt_isWithinSameWeek:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        if ([self mt_isOnOrAfter:[date mt_startOfCurrentWeek]] && [self mt_isOnOrBefore:[date mt_endOfCurrentWeek]]) {
+            return YES;
+        }
+        return NO;
+	}
+}
+
+- (BOOL)mt_isWithinSameDay:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        if ([self mt_year] == [date mt_year] && [self mt_monthOfYear] == [date mt_monthOfYear] && [self mt_dayOfMonth] == [date mt_dayOfMonth]) {
+            return YES;
+        }
+        return NO;
+	}
+}
+
+- (BOOL)mt_isWithinSameHour:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        if ([self mt_year] == [date mt_year] && [self mt_monthOfYear] == [date mt_monthOfYear] && [self mt_dayOfMonth] == [date mt_dayOfMonth] && [self mt_hourOfDay] == [date mt_hourOfDay]) {
+            return YES;
+        }
+        return NO;
+	}
+}
+
+- (BOOL)mt_isBetweenDate:(NSDate *)date1 andDate:(NSDate *)date2 {
+    if ([self mt_isOnOrAfter:date1] && [self mt_isOnOrBefore:date2])
         return YES;
-    }
-    return NO;
-}
-
-- (BOOL)isWithinSameMonth:(NSDate *)date
-{
-    if ([self year] == [date year] && [self monthOfYear] == [date monthOfYear]) {
-        return YES;
-    }
-    return NO;
-}
-
-- (BOOL)isWithinSameWeek:(NSDate *)date
-{
-    if ([self isOnOrAfter:[date startOfCurrentWeek]] && [self isOnOrBefore:[date endOfCurrentWeek]]) {
-        return YES;
-    }
-    return NO;
-}
-
-- (BOOL)isWithinSameDay:(NSDate *)date
-{
-    if ([self year] == [date year] && [self monthOfYear] == [date monthOfYear] && [self dayOfMonth] == [date dayOfMonth]) {
-        return YES;
-    }
-    return NO;
-}
-
-- (BOOL)isWithinSameHour:(NSDate *)date
-{
-    if ([self year] == [date year] && [self monthOfYear] == [date monthOfYear] && [self dayOfMonth] == [date dayOfMonth] && [self hourOfDay] == [date hourOfDay]) {
-        return YES;
-    }
-    return NO;
-}
-
-- (BOOL)isBetweenDate:(NSDate *)date1 andDate:(NSDate *)date2 {
-    if ([self isOnOrAfter:date1] && [self isOnOrBefore:date2])
-        return YES;
-    else if ([self isOnOrAfter:date2] && [self isOnOrBefore:date1])
+    else if ([self mt_isOnOrAfter:date2] && [self mt_isOnOrBefore:date1])
         return YES;
     else
         return NO;
@@ -932,227 +1175,1171 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
 
 #pragma mark - STRINGS
 
++ (void)mt_setFormatterDateStyle:(NSDateFormatterStyle)style
+{
+	@synchronized([NSDate mt_lockObject]){
+        __dateStyle = style;
+        [[NSDate mt_sharedFormatter] setDateStyle:style];
+	}
+}
+
++ (void)mt_setFormatterTimeStyle:(NSDateFormatterStyle)style
+{
+	@synchronized([NSDate mt_lockObject]){
+        __timeStyle = style;
+        [[NSDate mt_sharedFormatter] setTimeStyle:style];
+	}
+}
+
+- (NSString *)mt_stringValue
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [[NSDate mt_sharedFormatter] stringFromDate:self];
+	}
+}
+
+- (NSString *)mt_stringValueWithDateStyle:(NSDateFormatterStyle)dateStyle timeStyle:(NSDateFormatterStyle)timeStyle
+{
+	@synchronized([NSDate mt_lockObject]){
+        [[NSDate mt_sharedFormatter] setDateStyle:dateStyle];
+        [[NSDate mt_sharedFormatter] setTimeStyle:timeStyle];
+        NSString *str = [[NSDate mt_sharedFormatter] stringFromDate:self];
+        [[NSDate mt_sharedFormatter] setDateStyle:__dateStyle];
+        [[NSDate mt_sharedFormatter] setTimeStyle:__timeStyle];
+        return str;
+	}
+}
+
+- (NSString *)mt_stringFromDateWithHourAndMinuteFormat:(MTDateHourFormat)format {
+    if (format == MTDateHourFormat24Hour) {
+        return [self mt_stringFromDateWithFormat:@"HH:mm" localized:YES];
+    }
+    else {
+        return [self mt_stringFromDateWithFormat:@"hh:mma" localized:YES];
+    }
+}
+
+- (NSString *)mt_stringFromDateWithShortMonth {
+    return [self mt_stringFromDateWithFormat:@"MMM" localized:YES];
+}
+
+- (NSString *)mt_stringFromDateWithFullMonth {
+    return [self mt_stringFromDateWithFormat:@"MMMM" localized:YES];
+}
+
+- (NSString *)mt_stringFromDateWithAMPMSymbol {
+    return [self mt_stringFromDateWithFormat:@"a" localized:NO];
+}
+
+- (NSString *)mt_stringFromDateWithShortWeekdayTitle {
+    return [self mt_stringFromDateWithFormat:@"E" localized:YES];
+}
+
+- (NSString *)mt_stringFromDateWithFullWeekdayTitle {
+    return [self mt_stringFromDateWithFormat:@"EEEE" localized:YES];
+}
+
+- (NSString *)mt_stringFromDateWithFormat:(NSString *)format localized:(BOOL)localized
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSDateFormatter *formatter = [NSDate mt_sharedFormatter];
+        if (localized) format = [NSDateFormatter dateFormatFromTemplate:format options:0 locale:__locale];
+        [formatter setDateFormat:format];
+        return [formatter stringFromDate:self];
+	}
+}
+
+- (NSString *)mt_stringFromDateWithISODateTime
+{
+    return [self mt_stringFromGMTDateWithFormat:@"yyyy-MM-dd HH:mm:ss Z"];
+}
+
+- (NSString *)mt_stringFromDateWithGreatestComponentsForSecondsPassed:(NSTimeInterval)interval
+{
+	@synchronized([NSDate mt_lockObject]){
+
+        NSMutableString *s = [NSMutableString string];
+        NSTimeInterval absInterval = interval > 0 ? interval : -interval;
+
+        NSInteger months = floor(absInterval / (float)SECONDS_IN_MONTH);
+        if (months > 0) {
+            [s appendFormat:@"%ld months, ", (long)months];
+            absInterval -= months * SECONDS_IN_MONTH;
+        }
+
+        NSInteger days = floor(absInterval / (float)SECONDS_IN_DAY);
+        if (days > 0) {
+            [s appendFormat:@"%ld days, ", (long)days];
+            absInterval -= days * SECONDS_IN_DAY;
+        }
+
+        NSInteger hours = floor(absInterval / (float)SECONDS_IN_HOUR);
+        if (hours > 0) {
+            [s appendFormat:@"%ld hours, ", (long)hours];
+            absInterval -= hours * SECONDS_IN_HOUR;
+        }
+
+        NSInteger minutes = floor(absInterval / (float)SECONDS_IN_MINUTE);
+        if (minutes > 0) {
+            [s appendFormat:@"%ld minutes, ", (long)minutes];
+            absInterval -= minutes * SECONDS_IN_MINUTE;
+        }
+
+        NSInteger seconds = absInterval;
+        if (seconds > 0) {
+            [s appendFormat:@"%ld seconds, ", (long)seconds];
+        }
+
+        NSString *preString = [s stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" ,"]];
+        return interval < 0 ? [NSString stringWithFormat:@"%@ before", preString] : [NSString stringWithFormat:@"%@ after", preString];
+	}
+}
+
+- (NSString *)mt_stringFromDateWithGreatestComponentsUntilDate:(NSDate *)date
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSMutableArray *s = [NSMutableArray array];
+        NSTimeInterval interval = [date timeIntervalSinceDate:self];
+        NSTimeInterval absInterval = interval > 0 ? interval : -interval;
+
+        NSInteger months = floor(absInterval / (float)SECONDS_IN_MONTH);
+        if (months > 0) {
+            NSString *formatString = months == 1 ? @"%ld month" : @"%ld months";
+            [s addObject:[NSString stringWithFormat:formatString, (long)months]];
+            absInterval -= months * SECONDS_IN_MONTH;
+        }
+
+        NSInteger days = floor(absInterval / (float)SECONDS_IN_DAY);
+        if (days > 0) {
+            NSString *formatString = days == 1 ? @"%ld day" : @"%ld days";
+            [s addObject:[NSString stringWithFormat:formatString, (long)days]];
+            absInterval -= days * SECONDS_IN_DAY;
+        }
+
+        NSInteger hours = floor(absInterval / (float)SECONDS_IN_HOUR);
+        if (hours > 0) {
+            NSString *formatString = hours == 1 ? @"%ld hour" : @"%ld hours";
+            [s addObject:[NSString stringWithFormat:formatString, (long)hours]];
+            absInterval -= hours * SECONDS_IN_HOUR;
+        }
+
+        NSInteger minutes = floor(absInterval / (float)SECONDS_IN_MINUTE);
+        if (minutes > 0) {
+            NSString *formatString = minutes == 1 ? @"%ld minute" : @"%ld minutes";
+            [s addObject:[NSString stringWithFormat:formatString, (long)minutes]];
+        }
+
+        NSString *preString = [s componentsJoinedByString:@", "];
+        return interval < 0 ? [NSString stringWithFormat:@"%@ Ago", preString] : [NSString stringWithFormat:@"In %@", preString];
+	}
+}
+
+- (NSString *) mt_stringFromGMTDateWithFormat:(NSString *)format {
+    @synchronized([NSDate mt_lockObject]){
+        NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+        [formatter setDateFormat:format];
+        [formatter setTimeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]];
+        return [formatter stringFromDate:self];
+    }
+}
+
+#pragma mark - MISC
+
++ (NSArray *)mt_datesCollectionFromDate:(NSDate *)startDate untilDate:(NSDate *)endDate
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSInteger days = [endDate mt_daysSinceDate:startDate];
+        NSMutableArray *datesArray = [NSMutableArray array];
+
+        for (int i = 0; i < days; i++) {
+            [datesArray addObject:[startDate mt_dateDaysAfter:i]];
+        }
+
+        return [NSArray arrayWithArray:datesArray];
+	}
+}
+
+- (NSArray *)mt_hoursInCurrentDayAsDatesCollection
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSMutableArray *hours = [NSMutableArray array];
+        for (int i = 23; i >= 0; i--) {
+            [hours addObject:[NSDate mt_dateFromYear:[self mt_year]
+                                               month:[self mt_monthOfYear]
+                                                 day:[self mt_dayOfMonth]
+                                                hour:i
+                                              minute:0]];
+        }
+        return [NSArray arrayWithArray:hours];
+	}
+}
+
+- (BOOL)mt_isInAM
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_hourOfDay] > 11 ? NO : YES;
+	}
+}
+
+- (BOOL)mt_isStartOfAnHour
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [self mt_minuteOfHour] == [NSDate mt_minValueForUnit:NSHourCalendarUnit] && [self mt_secondOfMinute] == [NSDate mt_minValueForUnit:NSSecondCalendarUnit];
+	}
+}
+
+- (NSUInteger)mt_weekdayStartOfCurrentMonth
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_startOfCurrentMonth] mt_weekdayOfWeek];
+	}
+}
+
+- (NSUInteger)mt_daysInCurrentMonth
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfCurrentMonth] mt_dayOfMonth];
+	}
+}
+
+- (NSUInteger)mt_daysInPreviousMonth
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfPreviousMonth] mt_dayOfMonth];
+	}
+}
+
+- (NSUInteger)mt_daysInNextMonth
+{
+	@synchronized([NSDate mt_lockObject]){
+        return [[self mt_endOfNextMonth] mt_dayOfMonth];
+	}
+}
+
+- (NSDate *)mt_inTimeZone:(NSTimeZone *)timezone
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSTimeZone *current             = __timeZone ? __timeZone : [NSTimeZone defaultTimeZone];
+        NSTimeInterval currentOffset    = [current secondsFromGMTForDate:self];
+        NSTimeInterval toOffset         = [timezone secondsFromGMTForDate:self];
+        NSTimeInterval diff             = toOffset - currentOffset;
+        return [self dateByAddingTimeInterval:diff];
+	}
+}
+
++ (NSInteger)mt_minValueForUnit:(NSCalendarUnit)unit
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSRange r = [[self mt_calendar] minimumRangeOfUnit:unit];
+        return r.location;
+	}
+}
+
++ (NSInteger)mt_maxValueForUnit:(NSCalendarUnit)unit
+{
+	@synchronized([NSDate mt_lockObject]){
+        NSRange r = [[self mt_calendar] maximumRangeOfUnit:unit];
+        return r.length - 1;
+	}
+}
+
+
+
+
+#pragma mark - Private
+
++ (void)mt_prepareDefaults
+{
+    if (!__calendarType) {
+        __calendarType = [(NSCalendar *)[NSCalendar currentCalendar] calendarIdentifier];
+    }
+
+    if (!__locale) {
+        __locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    }
+
+    if (!__timeZone) {
+        __timeZone = [NSTimeZone localTimeZone];
+    }
+}
+
++ (NSCalendar *)mt_calendar
+{
+    [self mt_prepareDefaults];
+
+    if (!__calendar) {
+        __calendar                            = [[NSCalendar alloc] initWithCalendarIdentifier:__calendarType];
+        __calendar.firstWeekday               = __firstWeekday;
+        __calendar.minimumDaysInFirstWeek     = (NSUInteger)__weekNumberingSystem;
+        __calendar.timeZone                   = __timeZone;
+    }
+        
+    return __calendar;
+}
+
++ (NSDateComponents *)mt_components
+{
+    [self mt_prepareDefaults];
+    
+    if (!__components) {
+        __components = [[NSDateComponents alloc] init];
+        __components.calendar = [self mt_calendar];
+        if (__timeZone) __components.timeZone = __timeZone;
+    }
+    
+    [__components setEra:NSUndefinedDateComponent];
+    [__components setYear:NSUndefinedDateComponent];
+    [__components setMonth:NSUndefinedDateComponent];
+    [__components setDay:NSUndefinedDateComponent];
+    [__components setHour:NSUndefinedDateComponent];
+    [__components setMinute:NSUndefinedDateComponent];
+    [__components setSecond:NSUndefinedDateComponent];
+    [__components setWeek:NSUndefinedDateComponent];
+    [__components setWeekday:NSUndefinedDateComponent];
+    [__components setWeekdayOrdinal:NSUndefinedDateComponent];
+    [__components setQuarter:NSUndefinedDateComponent];
+    
+    return __components;
+}
+
++ (void)mt_reset
+{
+	@synchronized([NSDate mt_lockObject]){
+        __calendar      = nil;
+        __components    = nil;
+        __formatter     = nil;
+	}
+}
+
++ (id)mt_lockObject
+{
+    static NSObject *__lockObject = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        __lockObject = [NSObject new];
+    });
+    return __lockObject;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#if MTDATES_NO_PREFIX
+
+#pragma mark - NO PREFIX
+
++ (NSDateFormatter *)sharedFormatter
+{
+    return [self mt_sharedFormatter];
+}
+
+#pragma mark - GLOBAL CONFIG (NO PREFIX)
+
++ (void)setCalendarIdentifier:(NSString *)identifier
+{
+    [self mt_setCalendarIdentifier:identifier];
+}
+
++ (void)setLocale:(NSLocale *)locale
+{
+    [self mt_setLocale:locale];
+}
+
++ (void)setTimeZone:(NSTimeZone *)timeZone
+{
+    [self mt_setTimeZone:timeZone];
+}
+
++ (void)setFirstDayOfWeek:(NSUInteger)firstDay
+{
+    [self mt_setFirstDayOfWeek:firstDay];
+}
+
++ (void)setWeekNumberingSystem:(MTDateWeekNumberingSystem)system {
+    [self mt_setWeekNumberingSystem:system];
+}
+
+#pragma mark - CONSTRUCTORS (NO PREFIX)
+
++ (NSDate *)dateFromISOString:(NSString *)ISOString
+{
+    return [self mt_dateFromISOString:ISOString];
+}
+
++ (NSDate *)dateFromString:(NSString *)string usingFormat:(NSString *)format
+{
+    return [self mt_dateFromString:string usingFormat:format];
+}
+
++ (NSDate *)dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day
+{
+    return [self mt_dateFromYear:year month:month day:day];
+}
+
++ (NSDate *)dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day hour:(NSUInteger)hour minute:(NSUInteger)minute
+{
+    return [self mt_dateFromYear:year month:month day:day hour:hour minute:minute];
+}
+
++ (NSDate *)dateFromYear:(NSUInteger)year month:(NSUInteger)month day:(NSUInteger)day hour:(NSUInteger)hour minute:(NSUInteger)minute second:(NSUInteger)second
+{
+    return [self mt_dateFromYear:year month:month day:day hour:hour minute:minute second:second];
+}
+
++ (NSDate *)dateFromYear:(NSUInteger)year week:(NSUInteger)week weekday:(NSUInteger)weekday
+{
+    return [self mt_dateFromYear:year week:week weekday:weekday];
+}
+
++ (NSDate *)dateFromYear:(NSUInteger)year week:(NSUInteger)week weekday:(NSUInteger)weekday hour:(NSUInteger)hour minute:(NSUInteger)minute
+{
+    return [self mt_dateFromYear:year week:week weekday:weekday hour:hour minute:minute];
+}
+
++ (NSDate *)dateFromYear:(NSUInteger)year week:(NSUInteger)week weekday:(NSUInteger)weekday hour:(NSUInteger)hour minute:(NSUInteger)minute second:(NSUInteger)second
+{
+    return [self mt_dateFromYear:year week:week weekday:weekday hour:hour minute:minute second:second];
+}
+
+- (NSDate *)dateByAddingYears:(NSInteger)years months:(NSInteger)months weeks:(NSInteger)weeks days:(NSInteger)days hours:(NSInteger)hours minutes:(NSInteger)minutes seconds:(NSInteger)seconds
+{
+    return [self mt_dateByAddingYears:years months:months weeks:weeks days:days hours:hours minutes:minutes seconds:seconds];
+}
+
++ (NSDate *)dateFromComponents:(NSDateComponents *)components
+{
+    return [self mt_dateFromComponents:components];
+}
+
++ (NSDate*)startOfToday
+{
+    return [self mt_startOfToday];
+}
+
++ (NSDate*)startOfYesterday
+{
+    return [self mt_startOfYesterday];
+}
+
++ (NSDate*)startOfTomorrow
+{
+    return [self mt_startOfTomorrow];
+}
+
++ (NSDate*)endOfToday
+{
+    return [self mt_endOfToday];
+}
+
++ (NSDate*)endOfYesterday
+{
+    return [self mt_endOfYesterday];
+}
+
++ (NSDate*)endOfTomorrow
+{
+    return [self mt_endOfTomorrow];
+}
+
+
+#pragma mark - SYMBOLS (NO PREFIX)
+
++ (NSArray *)shortWeekdaySymbols
+{
+    return [self mt_shortWeekdaySymbols];
+}
+
++ (NSArray *)weekdaySymbols
+{
+    return [self mt_weekdaySymbols];
+}
+
++ (NSArray *)veryShortWeekdaySymbols
+{
+    return [self mt_veryShortWeekdaySymbols];
+}
+
++ (NSArray *)shortMonthlySymbols
+{
+    return [self mt_shortMonthlySymbols];
+}
+
++ (NSArray *)monthlySymbols
+{
+    return [self mt_monthlySymbols];
+}
+
++ (NSArray *)veryShortMonthlySymbols
+{
+    return [self mt_veryShortMonthlySymbols];
+}
+
+#pragma mark - COMPONENTS (NO PREFIX)
+
+- (NSUInteger)year
+{
+    return [self mt_year];
+}
+
+- (NSUInteger)weekOfYear
+{
+    return [self mt_weekOfYear];
+}
+
+- (NSUInteger)weekdayOfWeek
+{
+    return [self mt_weekdayOfWeek];
+}
+
+- (NSUInteger)weekOfMonth
+{
+    return [self mt_weekOfMonth];
+}
+
+- (NSUInteger)monthOfYear
+{
+    return [self mt_monthOfYear];
+}
+
+- (NSUInteger)dayOfMonth
+{
+    return [self mt_dayOfMonth];
+}
+
+- (NSUInteger)hourOfDay
+{
+    return [self mt_hourOfDay];
+}
+
+- (NSUInteger)minuteOfHour
+{
+    return [self mt_minuteOfHour];
+}
+
+- (NSUInteger)secondOfMinute
+{
+    return [self mt_secondOfMinute];
+}
+
+- (NSTimeInterval)secondsIntoDay
+{
+    return [self mt_secondsIntoDay];
+}
+
+- (NSDateComponents *)components
+{
+    return [self mt_components];
+}
+
+#pragma mark - RELATIVES (NO PREFIX)
+
+
+#pragma mark years
+
+- (NSDate *)startOfPreviousYear
+{
+    return [self mt_startOfPreviousYear];
+}
+
+- (NSDate *)startOfCurrentYear
+{
+    return [self mt_startOfCurrentYear];
+}
+
+- (NSDate *)startOfNextYear
+{
+    return [self mt_startOfNextYear];
+}
+
+- (NSDate *)endOfPreviousYear
+{
+    return [self mt_endOfPreviousYear];
+}
+
+- (NSDate *)endOfCurrentYear
+{
+    return [self mt_endOfCurrentYear];
+}
+
+- (NSDate *)endOfNextYear
+{
+    return [self mt_endOfNextYear];
+}
+
+- (NSDate *)oneYearPrevious
+{
+    return [self mt_oneYearPrevious];
+}
+
+- (NSDate *)oneYearNext
+{
+    return [self mt_oneYearNext];
+}
+
+- (NSDate *)dateYearsBefore:(NSUInteger)years
+{
+    return [self mt_dateYearsBefore:years];
+}
+
+- (NSDate *)dateYearsAfter:(NSUInteger)years
+{
+    return [self mt_dateYearsAfter:years];
+}
+
+- (NSInteger)yearsSinceDate:(NSDate *)date
+{
+    return [self mt_yearsSinceDate:date];
+}
+
+- (NSInteger)yearsUntilDate:(NSDate *)date
+{
+    return [self mt_yearsUntilDate:date];
+}
+
+#pragma mark months
+
+- (NSDate *)startOfPreviousMonth
+{
+    return [self mt_startOfPreviousMonth];
+}
+
+- (NSDate *)startOfCurrentMonth
+{
+    return [self mt_startOfCurrentMonth];
+}
+
+- (NSDate *)startOfNextMonth
+{
+    return [self mt_startOfNextMonth];
+}
+
+- (NSDate *)endOfPreviousMonth
+{
+    return [self mt_endOfPreviousMonth];
+}
+
+- (NSDate *)endOfCurrentMonth
+{
+    return [self mt_endOfCurrentMonth];
+}
+
+- (NSDate *)endOfNextMonth
+{
+    return [self mt_endOfNextMonth];
+}
+
+- (NSDate *)oneMonthPrevious
+{
+    return [self mt_oneMonthPrevious];
+}
+
+- (NSDate *)oneMonthNext
+{
+    return [self mt_oneMonthNext];
+}
+
+- (NSDate *)dateMonthsBefore:(NSUInteger)months
+{
+    return [self mt_dateMonthsBefore:months];
+}
+
+- (NSDate *)dateMonthsAfter:(NSUInteger)months
+{
+    return [self mt_dateMonthsAfter:months];
+}
+
+- (NSInteger)monthsSinceDate:(NSDate *)date
+{
+    return [self mt_monthsSinceDate:date];
+}
+
+- (NSInteger)monthsUntilDate:(NSDate *)date
+{
+    return [self mt_monthsUntilDate:date];
+}
+
+#pragma mark weeks
+
+- (NSDate *)startOfPreviousWeek
+{
+    return [self mt_startOfPreviousWeek];
+}
+
+- (NSDate *)startOfCurrentWeek
+{
+    return [self mt_startOfCurrentWeek];
+}
+
+- (NSDate *)startOfNextWeek
+{
+    return [self mt_startOfNextWeek];
+}
+
+- (NSDate *)endOfPreviousWeek
+{
+    return [self mt_endOfPreviousWeek];
+}
+
+- (NSDate *)endOfCurrentWeek
+{
+    return [self mt_endOfCurrentWeek];
+}
+
+- (NSDate *)endOfNextWeek
+{
+    return [self mt_endOfNextWeek];
+}
+
+- (NSDate *)oneWeekPrevious
+{
+    return [self mt_oneWeekPrevious];
+}
+
+- (NSDate *)oneWeekNext
+{
+    return [self mt_oneWeekNext];
+}
+
+- (NSDate *)dateWeeksBefore:(NSUInteger)weeks
+{
+    return [self mt_dateWeeksBefore:weeks];
+}
+
+- (NSDate *)dateWeeksAfter:(NSUInteger)weeks
+{
+    return [self mt_dateWeeksAfter:weeks];
+}
+
+- (NSInteger)weeksSinceDate:(NSDate *)date
+{
+    return [self mt_weeksSinceDate:date];
+}
+
+- (NSInteger)weeksUntilDate:(NSDate *)date
+{
+    return [self mt_weeksUntilDate:date];
+}
+
+#pragma mark days
+
+- (NSDate *)startOfPreviousDay
+{
+    return [self mt_startOfPreviousDay];
+}
+
+- (NSDate *)startOfCurrentDay
+{
+    return [self mt_startOfCurrentDay];
+}
+
+- (NSDate *)startOfNextDay
+{
+    return [self mt_startOfNextDay];
+}
+
+- (NSDate *)endOfPreviousDay
+{
+    return [self mt_endOfPreviousDay];
+}
+
+- (NSDate *)endOfCurrentDay
+{
+    return [self mt_endOfCurrentDay];
+}
+
+- (NSDate *)endOfNextDay
+{
+    return [self mt_endOfNextDay];
+}
+
+- (NSDate *)oneDayPrevious
+{
+    return [self mt_oneDayPrevious];
+}
+
+- (NSDate *)oneDayNext
+{
+    return [self mt_oneDayNext];
+}
+
+- (NSDate *)dateDaysBefore:(NSUInteger)days
+{
+    return [self mt_dateDaysBefore:days];
+}
+
+- (NSDate *)dateDaysAfter:(NSUInteger)days
+{
+    return [self mt_dateDaysAfter:days];
+}
+
+- (NSInteger)daysSinceDate:(NSDate *)date
+{
+    return [self mt_daysSinceDate:date];
+}
+
+- (NSInteger)daysUntilDate:(NSDate *)date
+{
+    return [self mt_daysUntilDate:date];
+}
+
+#pragma mark hours
+
+- (NSDate *)startOfPreviousHour
+{
+    return [self mt_startOfPreviousHour];
+}
+
+- (NSDate *)startOfCurrentHour
+{
+    return [self mt_startOfCurrentHour];
+}
+
+- (NSDate *)startOfNextHour
+{
+    return [self mt_startOfNextHour];
+}
+
+- (NSDate *)endOfPreviousHour
+{
+    return [self mt_endOfPreviousHour];
+}
+
+- (NSDate *)endOfCurrentHour
+{
+    return [self mt_endOfCurrentHour];
+}
+
+- (NSDate *)endOfNextHour
+{
+    return [self mt_endOfNextHour];
+}
+
+- (NSDate *)oneHourPrevious
+{
+    return [self mt_oneHourPrevious];
+}
+
+- (NSDate *)oneHourNext
+{
+    return [self mt_oneHourNext];
+}
+
+- (NSDate *)dateHoursBefore:(NSUInteger)hours
+{
+    return [self mt_dateHoursBefore:hours];
+}
+
+- (NSDate *)dateHoursAfter:(NSUInteger)hours
+{
+    return [self mt_dateHoursAfter:hours];
+}
+
+- (NSInteger)hoursSinceDate:(NSDate *)date
+{
+    return [self mt_hoursSinceDate:date];
+}
+
+- (NSInteger)hoursUntilDate:(NSDate *)date
+{
+    return [self mt_hoursUntilDate:date];
+}
+
+#pragma mark minutes
+
+- (NSDate *)startOfPreviousMinute
+{
+    return [self mt_startOfPreviousMinute];
+}
+
+- (NSDate *)startOfCurrentMinute
+{
+    return [self mt_startOfCurrentMinute];
+}
+
+- (NSDate *)startOfNextMinute
+{
+    return [self mt_startOfNextMinute];
+}
+
+- (NSDate *)endOfPreviousMinute
+{
+    return [self mt_endOfPreviousMinute];
+}
+
+- (NSDate *)endOfCurrentMinute
+{
+    return [self mt_endOfCurrentMinute];
+}
+
+- (NSDate *)endOfNextMinute
+{
+    return [self mt_endOfNextMinute];
+}
+
+- (NSDate *)oneMinutePrevious
+{
+    return [self mt_oneMinutePrevious];
+}
+
+- (NSDate *)oneMinuteNext
+{
+    return [self mt_oneMinuteNext];
+}
+
+- (NSDate *)dateMinutesBefore:(NSUInteger)minutes
+{
+    return [self mt_dateMinutesBefore:minutes];
+}
+
+- (NSDate *)dateMinutesAfter:(NSUInteger)minutes
+{
+    return [self mt_dateMinutesAfter:minutes];
+}
+
+- (NSInteger)minutesSinceDate:(NSDate *)date
+{
+    return [self mt_minutesSinceDate:date];
+}
+
+- (NSInteger)minutesUntilDate:(NSDate *)date
+{
+    return [self mt_minutesUntilDate:date];
+}
+
+#pragma mark seconds
+
+- (NSDate *)startOfPreviousSecond
+{
+    return [self mt_startOfPreviousSecond];
+}
+
+- (NSDate *)startOfNextSecond
+{
+    return [self mt_startOfNextSecond];
+}
+
+- (NSDate *)oneSecondPrevious
+{
+    return [self mt_oneSecondPrevious];
+}
+
+- (NSDate *)oneSecondNext
+{
+    return [self mt_oneSecondNext];
+}
+
+- (NSDate *)dateSecondsBefore:(NSUInteger)seconds
+{
+    return [self mt_dateSecondsBefore:seconds];
+}
+
+- (NSDate *)dateSecondsAfter:(NSUInteger)seconds
+{
+    return [self mt_dateSecondsAfter:seconds];
+}
+
+- (NSInteger)secondsSinceDate:(NSDate *)date
+{
+    return [self mt_secondsSinceDate:date];
+}
+
+- (NSInteger)secondsUntilDate:(NSDate *)date
+{
+    return [self mt_secondsUntilDate:date];
+}
+
+#pragma mark - COMPARES (NO PREFIX)
+
+- (BOOL)isAfter:(NSDate *)date
+{
+    return [self mt_isAfter:date];
+}
+
+- (BOOL)isBefore:(NSDate *)date
+{
+    return [self mt_isBefore:date];
+}
+
+- (BOOL)isOnOrAfter:(NSDate *)date
+{
+    return [self mt_isOnOrAfter:date];
+}
+
+- (BOOL)isOnOrBefore:(NSDate *)date
+{
+    return [self mt_isOnOrBefore:date];
+}
+
+- (BOOL)isWithinSameMonth:(NSDate *)date
+{
+    return [self mt_isWithinSameMonth:date];
+}
+
+- (BOOL)isWithinSameWeek:(NSDate *)date
+{
+    return [self mt_isWithinSameWeek:date];
+}
+
+- (BOOL)isWithinSameDay:(NSDate *)date
+{
+    return [self mt_isWithinSameDay:date];
+}
+
+- (BOOL)isWithinSameHour:(NSDate *)date
+{
+    return [self mt_isWithinSameHour:date];
+}
+
+- (BOOL)isBetweenDate:(NSDate *)date1 andDate:(NSDate *)date2
+{
+    return [self mt_isBetweenDate:date1 andDate:date2];
+}
+
+#pragma mark - STRINGS (NO PREFIX)
+
 + (void)setFormatterDateStyle:(NSDateFormatterStyle)style
 {
-    __dateStyle = style;
-    [[NSDate sharedFormatter] setDateStyle:style];
+    return [self mt_setFormatterDateStyle:style];
 }
 
 + (void)setFormatterTimeStyle:(NSDateFormatterStyle)style
 {
-    __timeStyle = style;
-    [[NSDate sharedFormatter] setTimeStyle:style];
+    return [self mt_setFormatterTimeStyle:style];
 }
 
 - (NSString *)stringValue
 {
-    return [[NSDate sharedFormatter] stringFromDate:self];
+    return [self mt_stringValue];
 }
 
 - (NSString *)stringValueWithDateStyle:(NSDateFormatterStyle)dateStyle timeStyle:(NSDateFormatterStyle)timeStyle
 {
-    [[NSDate sharedFormatter] setDateStyle:dateStyle];
-    [[NSDate sharedFormatter] setTimeStyle:timeStyle];
-    NSString *str = [[NSDate sharedFormatter] stringFromDate:self];
-    [[NSDate sharedFormatter] setDateStyle:__dateStyle];
-    [[NSDate sharedFormatter] setTimeStyle:__timeStyle];
-    return str;
+    return [self mt_stringValueWithDateStyle:dateStyle timeStyle:timeStyle];
 }
 
-- (NSString *)stringFromDateWithHourAndMinuteFormat:(MTDateHourFormat)format {
-    if (format == MTDateHourFormat24Hour) {
-        return [self stringFromDateWithFormat:@"HH:mm"];
-    }
-    else {
-        return [self stringFromDateWithFormat:@"hh:mma"];
-    }
+- (NSString *)stringFromDateWithHourAndMinuteFormat:(MTDateHourFormat)format
+{
+    return [self mt_stringFromDateWithHourAndMinuteFormat:format];
 }
 
-- (NSString *)stringFromDateWithShortMonth {
-    return [self stringFromDateWithFormat:@"MMM"];
+- (NSString *)stringFromDateWithShortMonth
+{
+    return [self mt_stringFromDateWithShortMonth];
 }
 
-- (NSString *)stringFromDateWithFullMonth {
-    return [self stringFromDateWithFormat:@"MMMM"];
+- (NSString *)stringFromDateWithFullMonth
+{
+    return [self mt_stringFromDateWithFullMonth];
 }
 
-- (NSString *)stringFromDateWithAMPMSymbol {
-    return [self stringFromDateWithFormat:@"a"];
+- (NSString *)stringFromDateWithAMPMSymbol
+{
+    return [self mt_stringFromDateWithAMPMSymbol];
 }
 
-- (NSString *)stringFromDateWithShortWeekdayTitle {
-    return [self stringFromDateWithFormat:@"E"];
+- (NSString *)stringFromDateWithShortWeekdayTitle
+{
+    return [self mt_stringFromDateWithShortWeekdayTitle];
 }
 
-- (NSString *)stringFromDateWithFullWeekdayTitle {
-    return [self stringFromDateWithFormat:@"EEEE"];
+- (NSString *)stringFromDateWithFullWeekdayTitle
+{
+    return [self mt_stringFromDateWithFullWeekdayTitle];
 }
 
-- (NSString *)stringFromDateWithFormat:(NSString *)format {
-    NSDateFormatter *formatter = [NSDate sharedFormatter];
-    [formatter setDateFormat:format];
-    return [formatter stringFromDate:self];
-}
-
-- (NSString *)stringFromUTCDateWithFormat:(NSString *)format{
-    NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:format];
-    [formatter setTimeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]];
-    return [formatter stringFromDate:self];
+- (NSString *)stringFromDateWithFormat:(NSString *)format localized:(BOOL)localized
+{
+    return [self mt_stringFromDateWithFormat:format localized:localized];
 }
 
 - (NSString *)stringFromDateWithISODateTime
 {
-    return [self stringFromUTCDateWithFormat:@"yyyy-MM-dd HH:mm:ss Z"];
+    return [self mt_stringFromDateWithISODateTime];
 }
 
 - (NSString *)stringFromDateWithGreatestComponentsForSecondsPassed:(NSTimeInterval)interval
 {
-
-    NSMutableString *s = [NSMutableString string];
-    NSTimeInterval absInterval = interval > 0 ? interval : -interval;
-
-    NSInteger months = floor(absInterval / (float)SECONDS_IN_MONTH);
-    if (months > 0) {
-        [s appendFormat:@"%ld months, ", (long)months];
-        absInterval -= months * SECONDS_IN_MONTH;
-    }
-
-    NSInteger days = floor(absInterval / (float)SECONDS_IN_DAY);
-    if (days > 0) {
-        [s appendFormat:@"%ld days, ", (long)days];
-        absInterval -= days * SECONDS_IN_DAY;
-    }
-
-    NSInteger hours = floor(absInterval / (float)SECONDS_IN_HOUR);
-    if (hours > 0) {
-        [s appendFormat:@"%ld hours, ", (long)hours];
-        absInterval -= hours * SECONDS_IN_HOUR;
-    }
-
-    NSInteger minutes = floor(absInterval / (float)SECONDS_IN_MINUTE);
-    if (minutes > 0) {
-        [s appendFormat:@"%ld minutes, ", (long)minutes];
-        absInterval -= minutes * SECONDS_IN_MINUTE;
-    }
-
-    NSInteger seconds = absInterval;
-    if (seconds > 0) {
-        [s appendFormat:@"%ld seconds, ", (long)seconds];
-    }
-
-    NSString *preString = [s stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" ,"]];
-    return interval < 0 ? [NSString stringWithFormat:@"%@ before", preString] : [NSString stringWithFormat:@"%@ after", preString];
+    return [self mt_stringFromDateWithGreatestComponentsForSecondsPassed:interval];
 }
 
 - (NSString *)stringFromDateWithGreatestComponentsUntilDate:(NSDate *)date
 {
-    NSMutableArray *s = [NSMutableArray array];
-    NSTimeInterval interval = [date timeIntervalSinceDate:self];
-    NSTimeInterval absInterval = interval > 0 ? interval : -interval;
-
-    NSInteger months = floor(absInterval / (float)SECONDS_IN_MONTH);
-    if (months > 0) {
-        NSString *formatString = months == 1 ? @"%ld month" : @"%ld months";
-        [s addObject:[NSString stringWithFormat:formatString, (long)months]];
-        absInterval -= months * SECONDS_IN_MONTH;
-    }
-
-    NSInteger days = floor(absInterval / (float)SECONDS_IN_DAY);
-    if (days > 0) {
-        NSString *formatString = days == 1 ? @"%ld day" : @"%ld days";
-        [s addObject:[NSString stringWithFormat:formatString, (long)days]];
-        absInterval -= days * SECONDS_IN_DAY;
-    }
-
-    NSInteger hours = floor(absInterval / (float)SECONDS_IN_HOUR);
-    if (hours > 0) {
-        NSString *formatString = hours == 1 ? @"%ld hour" : @"%ld hours";
-        [s addObject:[NSString stringWithFormat:formatString, (long)hours]];
-        absInterval -= hours * SECONDS_IN_HOUR;
-    }
-
-    NSInteger minutes = floor(absInterval / (float)SECONDS_IN_MINUTE);
-    if (minutes > 0) {
-        NSString *formatString = minutes == 1 ? @"%ld minute" : @"%ld minutes";
-        [s addObject:[NSString stringWithFormat:formatString, (long)minutes]];
-    }
-
-    NSString *preString = [s componentsJoinedByString:@", "];
-    return interval < 0 ? [NSString stringWithFormat:@"%@ Ago", preString] : [NSString stringWithFormat:@"In %@", preString];
+    return [self mt_stringFromDateWithGreatestComponentsUntilDate:date];
 }
 
+- (NSString *)stringFromGMTDateWithFormat:(NSString *)format{
+    return [self mt_stringFromGMTDateWithFormat:format];
+}
 
-
-
-
-#pragma mark - MISC
+#pragma mark - MISC (NO PREFIX)
 
 + (NSArray *)datesCollectionFromDate:(NSDate *)startDate untilDate:(NSDate *)endDate
 {
-    NSInteger days = [endDate daysSinceDate:startDate];
-    NSMutableArray *datesArray = [NSMutableArray array];
-
-    for (int i = 0; i < days; i++) {
-        [datesArray addObject:[startDate dateDaysAfter:i]];
-    }
-
-    return [NSArray arrayWithArray:datesArray];
+    return [self mt_datesCollectionFromDate:startDate untilDate:endDate];
 }
 
 - (NSArray *)hoursInCurrentDayAsDatesCollection
 {
-    NSMutableArray *hours = [NSMutableArray array];
-    for (int i = 23; i >= 0; i--) {
-        [hours addObject:[NSDate dateFromYear:[self year]
-                                        month:[self monthOfYear]
-                                          day:[self dayOfMonth]
-                                         hour:i
-                                       minute:0]];
-    }
-    return [NSArray arrayWithArray:hours];
+    return [self mt_hoursInCurrentDayAsDatesCollection];
 }
 
 - (BOOL)isInAM
 {
-    return [self hourOfDay] > 11 ? NO : YES;
+    return [self mt_isInAM];
 }
 
 - (BOOL)isStartOfAnHour
 {
-    return [self minuteOfHour] == 0 && [self secondOfMinute] == 0;
+    return [self mt_isStartOfAnHour];
 }
 
 - (NSUInteger)weekdayStartOfCurrentMonth
 {
-    return [[self startOfCurrentMonth] weekDayOfWeek];
+    return [self mt_weekdayStartOfCurrentMonth];
 }
 
 - (NSUInteger)daysInCurrentMonth
 {
-    return [[self endOfCurrentMonth] dayOfMonth];
+    return [self mt_daysInCurrentMonth];
 }
 
 - (NSUInteger)daysInPreviousMonth
 {
-    return [[self endOfPreviousMonth] dayOfMonth];
+    return [self mt_daysInPreviousMonth];
 }
 
 - (NSUInteger)daysInNextMonth
 {
-    return [[self endOfNextMonth] dayOfMonth];
+    return [self mt_daysInNextMonth];
 }
 
 - (NSDate *)inTimeZone:(NSTimeZone *)timezone
 {
-    NSTimeZone *current             = __timeZone ? __timeZone : [NSTimeZone defaultTimeZone];
-    NSTimeInterval currentOffset    = [current secondsFromGMTForDate:self];
-    NSTimeInterval toOffset         = [timezone secondsFromGMTForDate:self];
-    NSTimeInterval diff             = toOffset - currentOffset;
-    return [self dateByAddingTimeInterval:diff];
+    return [self mt_inTimeZone:timezone];
 }
 
++ (NSInteger)minValueForUnit:(NSCalendarUnit)unit
+{
+    return [self mt_minValueForUnit:unit];
+}
 
++ (NSInteger)maxValueForUnit:(NSCalendarUnit)unit
+{
+    return [self mt_maxValueForUnit:unit];
+}
+
+#endif
 
 @end
 
@@ -1161,7 +2348,7 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
 
 #pragma mark - Common Date Formats
 
-NSString *const MTDatesFormatDefault        = @"EE MMM dd yyyy HH:mm:ss";       // Sat Jun 09 2007 17:46:21
+NSString *const MTDatesFormatDefault        = @"EE, MMM dd, yyyy, HH:mm:ss";       // Sat Jun 09 2007 17:46:21
 NSString *const MTDatesFormatShortDate      = @"M/d/yy";                        // 6/9/07
 NSString *const MTDatesFormatMediumDate     = @"MMM d, yyyy";                   // Jun 9, 2007
 NSString *const MTDatesFormatLongDate       = @"MMMM d, yyyy";                  // June 9, 2007
@@ -1172,4 +2359,3 @@ NSString *const MTDatesFormatLongTime       = @"h:mm:ss a zzz";                 
 NSString *const MTDatesFormatISODate        = @"yyyy-MM-dd";                    // 2007-06-09
 NSString *const MTDatesFormatISOTime        = @"HH:mm:ss";                      // 17:46:21
 NSString *const MTDatesFormatISODateTime    = @"yyyy-MM-dd HH:mm:ss";           // 2007-06-09 17:46:21
-//NSString *const MTDatesFormatISOUTCDateTime   = @"yyyy-MM-dd'T'HH:mm:ss'Z'";      // 2007-06-09T22:46:21Z
