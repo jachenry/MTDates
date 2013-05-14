@@ -2181,6 +2181,11 @@ static NSDateFormatterStyle         __timeStyle             = NSDateFormatterSho
     return [self mt_isOnOrBefore:date];
 }
 
+- (BOOL)isWithinSameYear:(NSDate *)date
+{
+    return [self mt_isWithinSameYear:date];
+}
+
 - (BOOL)isWithinSameMonth:(NSDate *)date
 {
     return [self mt_isWithinSameMonth:date];
